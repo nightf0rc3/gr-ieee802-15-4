@@ -40,5 +40,6 @@ install(FILES
     rime_stack.h
     zeropadding_b.h
     zeropadding_removal_b.h
+    selective_jammer.h
     DESTINATION include/ieee802_15_4
 )

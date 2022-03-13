@@ -50,6 +50,7 @@ list(APPEND ieee802_15_4_sources
     uc_connection.cc
     zeropadding_b_impl.cc
     zeropadding_removal_b_impl.cc
+    selective_jammer_impl.cc
 )
 
 set(ieee802_15_4_sources "${ieee802_15_4_sources}" PARENT_SCOPE)
