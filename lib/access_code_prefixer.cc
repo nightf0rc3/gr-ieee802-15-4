@@ -41,10 +41,14 @@ public:
                                     this,
                                     boost::placeholders::_1));
         buf[0] = pad & 0xFF;
+        // 0000 0000
 
+        // Preamble: 0xa7 = 167 = 1010 0111
+        // Preamble can be 4 bytes
         for (int i = 4; i > 0; i--) {
+            // & 0xFF get last 8 bits
             buf[i] = d_preamble & 0xFF;
-            d_preamble >>= 8;
+            d_preamble >>= 8; // drop last 8 bits of preamble -> move to next 8 bits
         }
     }
 
@@ -66,6 +70,7 @@ public:
         assert(data_len);
         assert(data_len < 256 - 5);
 
+        // TODO: set Frame Length
         buf[5] = data_len;
 
         std::memcpy(buf + 6, pmt::blob_data(blob), data_len);

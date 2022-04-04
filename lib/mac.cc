@@ -133,7 +133,7 @@ public:
     void generate_mac(const char* buf, int len)
     {
 
-        // FCF
+        // FCF, Frame Control Field
         // data frame, no security
         d_msg[0] = d_fcf & 0xFF;
         d_msg[1] = (d_fcf >> 8) & 0xFF;

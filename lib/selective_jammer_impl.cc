@@ -33,6 +33,8 @@ using namespace gr::ieee802_15_4;
 #define VERBOSE 0
 // less verbose output for higher level debugging
 #define VERBOSE2 0
+// Custom verbose output, JRB relevant
+#define VERBOSE_C 1
 
 // this is the mapping between chips and symbols if we do
 // a fm demodulation of the O-QPSK signal. Note that this
@@ -41,10 +43,24 @@ using namespace gr::ieee802_15_4;
 // happening.
 // See "CMOS RFIC Architectures for IEEE 802.15.4 Networks",
 // John Notor, Anthony Caviglia, Gary Levy, for more details.
+// To Hex
 static const unsigned int CHIP_MAPPING[] = {
-    1618456172, 1309113062, 1826650030, 1724778362, 778887287, 2061946375,
-    2007919840, 125494990,  529027475,  838370585,  320833617, 422705285,
-    1368596360, 85537272,   139563807,  2021988657
+    1618456172, // preamble, 0
+    1309113062, // 1
+    1826650030,
+    1724778362,
+    778887287, // 4
+    2061946375,
+    2007919840,
+    125494990, // SFD first byte, 7
+    529027475,
+    838370585,
+    320833617, // SFD second byte, 10
+    422705285,
+    1368596360,
+    85537272,
+    139563807,
+    2021988657
 };
 
 static const int MAX_PKT_LEN = 128 - 1; // remove header and CRC
@@ -204,7 +220,9 @@ public:
                         fflush(stderr);
 
                 while (count < ninput) {
-
+                    // d_shift_reg wird mit bits aus input gefüllt
+                    // if input 1, shift left set last bit 1
+                    // if input 0, shift left
                     if (slice(inbuf[count++]))
                         d_shift_reg = (d_shift_reg << 1) | 1;
                     else
@@ -216,7 +234,22 @@ public:
 
                     // The first if block syncronizes to chip sequences.
                     if (d_preamble_cnt == 0) {
+                        // 0x7FFFFFFE == 2.147.483.646 -> INT_MAX
                         unsigned int threshold;
+                        // &
+                        //  0000 0000 0000 0000 0000 0000 0000 0001
+                        //  0111 1111 1111 1111 1111 1111 1111 1110
+                        // =0000 0000 0000 0000 0000 0000 0000 0000
+
+                        // &
+                        //  0110 0000 0111 0111 1010 1110 0110 1100
+                        //  0111 1111 1111 1111 1111 1111 1111 1110
+                        // =0110 0000 0111 0111 1010 1110 0110 1100
+
+                        // XOR
+                        //  0000 0000 0000 0000 0000 0000 0000 0000
+                        //  0110 0000 0111 0111 1010 1110 0110 1100
+                        // =0110 0000 0111 0111 1010 1110 0110 1100
                         threshold = gr::blocks::count_bits32(
                             (d_shift_reg & 0x7FFFFFFE) ^ (CHIP_MAPPING[0] & 0x7FFFFFFE));
                         if (threshold < d_threshold) {
@@ -256,7 +289,7 @@ public:
                                     if (VERBOSE2)
                                         fprintf(stderr, "Found first SFD\n"),
                                             fflush(stderr);
-                                    d_packet_byte = 7 << 4;
+                                    d_packet_byte = 7 << 4; // add bits of 7 and shift by 4
                                 } else {
                                     // we are not in the synchronization header
                                     if (VERBOSE2)
@@ -272,7 +305,7 @@ public:
                                 if (gr::blocks::count_bits32(
                                         (d_shift_reg & 0x7FFFFFFE) ^
                                         (CHIP_MAPPING[10] & 0xFFFFFFFE)) <= d_threshold) {
-                                    d_packet_byte |= 0xA;
+                                    d_packet_byte |= 0xA; // set last 4 bits 1010 (10)
                                     if (VERBOSE2)
                                         fprintf(
                                             stderr, "Found sync, 0x%x\n", d_packet_byte),
@@ -298,6 +331,7 @@ public:
 
             case STATE_HAVE_SYNC:
                 if (VERBOSE2)
+                    // FIXME: this is never set...
                     fprintf(stderr,
                             "Header Search bitcnt=%d, header=0x%08x\n",
                             d_headerbitlen_cnt,
@@ -336,7 +370,13 @@ public:
                         d_packet_byte_index = d_packet_byte_index + 1;
                         if (d_packet_byte_index % 2 == 0) {
                             // we have a complete byte which represents the frame length.
+                            // TODO: FRAME LENGTH HERE
                             int frame_len = d_packet_byte;
+                            if (VERBOSE_C)
+                                fprintf(stderr,
+                                        "Got Frame Length! %u\n",
+                                        frame_len),
+                                    fflush(stderr);
                             if (frame_len <= MAX_PKT_LEN) {
                                 // dout << "selective_jammer: got frame length" << std::endl;
                                 enter_have_header(frame_len);
@@ -380,9 +420,11 @@ public:
                             break;
                         }
                         // the first symbol represents the first part of the byte.
+                        // 0000 (0000) <- This
                         if (d_packet_byte_index == 0) {
                             d_packet_byte = c;
                         } else {
+                            // This -> (0000) 0000
                             // c is always < 15
                             d_packet_byte |= c << 4;
                         }
@@ -390,14 +432,12 @@ public:
                         d_packet_byte_index = d_packet_byte_index + 1;
                         if (d_packet_byte_index % 2 == 0) {
                             // we have a complete byte
-                            if (VERBOSE2)
+                            if (VERBOSE2 || VERBOSE_C)
                                 fprintf(stderr,
-                                        "packetcnt: %d, payloadcnt: %d, payload 0x%x, "
-                                        "d_packet_byte_index: %d\n",
+                                        "packetcnt: %d, payloadcnt: %d, payload 0x%x \n",
                                         d_packetlen_cnt,
                                         d_payload_cnt,
-                                        d_packet_byte,
-                                        d_packet_byte_index),
+                                        d_packet_byte),
                                     fflush(stderr);
 
                             d_packet[d_packetlen_cnt++] = d_packet_byte;
@@ -407,9 +447,13 @@ public:
                             // SYNC: 4 Byte preamble, 1 Byte SoF, 
                             // PHY: 1 Byte FrameLength
                             // MAC: 2 Byte Frame Control, 1 Byte Sequence Number, 0-20 Byte Addr
-
                             if (d_payload_cnt == 3) {
                               d_target_frame_num = d_packet_byte;
+                              if (VERBOSE_C)
+                                fprintf(stderr,
+                                        "Got FrameNo: %d \n",
+                                        d_packet_byte),
+                                    fflush(stderr);
                             }
                             // Build Dst Addr
                             if (d_payload_cnt == 6) {
@@ -473,7 +517,7 @@ public:
             }
         }
 
-        if (VERBOSE2)
+        if (VERBOSE2 || VERBOSE_C)
             fprintf(stderr, "Samples Processed: %d\n", ninput_items[0]), fflush(stderr);
 
         consume(0, ninput_items[0]);

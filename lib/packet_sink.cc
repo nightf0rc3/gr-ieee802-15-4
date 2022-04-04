@@ -32,6 +32,8 @@ using namespace gr::ieee802_15_4;
 #define VERBOSE 0
 // less verbose output for higher level debugging
 #define VERBOSE2 0
+// Custom verbose output, JRB relevant
+#define VERBOSE_C 1
 
 // this is the mapping between chips and symbols if we do
 // a fm demodulation of the O-QPSK signal. Note that this
@@ -127,6 +129,12 @@ public:
 
             return (char)best_match & 0xF;
         }
+        // if (VERBOSE_C)
+        //   fprintf(stderr,
+        //           "Found sequence with %d errors at 0x%x\n",
+        //           min_threshold,
+        //           (chips & 0x7FFFFFFE) ^ (CHIP_MAPPING[best_match] & 0x7FFFFFFE)),
+        //       fflush(stderr);
 
         return 0xFF;
     }
@@ -314,6 +322,11 @@ public:
                         if (d_packet_byte_index % 2 == 0) {
                             // we have a complete byte which represents the frame length.
                             int frame_len = d_packet_byte;
+                            if (VERBOSE_C)
+                                fprintf(stderr,
+                                        "Got Frame Length! %u\n",
+                                        frame_len),
+                                    fflush(stderr);
                             if (frame_len <= MAX_PKT_LEN) {
                                 enter_have_header(frame_len);
                             } else {
@@ -345,6 +358,23 @@ public:
                     if (d_chip_cnt == 0) {
                         unsigned char c = decode_chips(d_shift_reg);
                         if (c == 0xff) {
+                            std::string s = std::bitset<32>(d_shift_reg).to_string();
+                            if (VERBOSE_C) {
+                                fprintf(stderr,
+                                      "Bits before jam: %d, Last chip(b): %s\n",
+                                      d_bits_received_before_jam,
+                                      s.c_str()),
+                                  fflush(stderr);
+                                int i;
+                                for (i=0; i < d_packetlen_cnt; i++) {
+                                    fprintf(stderr,
+                                      "0x%x ",
+                                      d_packet[i]),
+                                      fflush(stderr);
+                                }
+                                fprintf(stderr, "\n"), fflush(stderr);
+                            }
+                            d_bits_received_before_jam = 0;
                             // something is wrong. restart the search for a sync
                             if (VERBOSE2)
                                 fprintf(stderr,
@@ -355,10 +385,13 @@ public:
                             enter_search();
                             break;
                         }
+                        d_bits_received_before_jam = d_bits_received_before_jam + 16;
                         // the first symbol represents the first part of the byte.
                         if (d_packet_byte_index == 0) {
+                            d_first_chip = d_shift_reg;
                             d_packet_byte = c;
                         } else {
+                            d_second_chip = d_shift_reg;
                             // c is always < 15
                             d_packet_byte |= c << 4;
                         }
@@ -368,21 +401,34 @@ public:
                             // we have a complete byte
                             if (VERBOSE2)
                                 fprintf(stderr,
-                                        "packetcnt: %d, payloadcnt: %d, payload 0x%x, "
-                                        "d_packet_byte_index: %d\n",
+                                        "packetcnt: %d, payloadcnt: %d, payload: 0x%x, chips: [%u,%u] \n",
                                         d_packetlen_cnt,
                                         d_payload_cnt,
                                         d_packet_byte,
-                                        d_packet_byte_index),
+                                        d_first_chip,
+                                        d_second_chip),
                                     fflush(stderr);
 
                             d_packet[d_packetlen_cnt++] = d_packet_byte;
                             d_payload_cnt++;
                             d_packet_byte_index = 0;
 
+                            if (d_payload_cnt == 3) {
+                              if (VERBOSE_C)
+                                fprintf(stderr,
+                                        "Got FrameNo: %d \n",
+                                        d_packet_byte),
+                                    fflush(stderr);
+                            }
+
                             if (d_payload_cnt >=
                                 d_packetlen) { // packet is filled, including CRC. might
                                                // do check later in here
+                                if (VERBOSE_C)
+                                  fprintf(stderr,
+                                        "Complete Packet Received, length: %d \n",
+                                        d_payload_cnt),
+                                    fflush(stderr);
                                 unsigned int scaled_lqi = (d_lqi / MAX_LQI_SAMPLES) << 3;
                                 unsigned char lqi =
                                     (scaled_lqi >= 256 ? 255 : scaled_lqi);
@@ -445,6 +491,11 @@ private:
 
     unsigned int d_lqi; // Link Quality Information
     unsigned int d_lqi_sample_count;
+
+    // NEW
+    unsigned int d_bits_received_before_jam = 0;
+    unsigned int d_first_chip;
+    unsigned int d_second_chip;
 
     // FIXME:
     char buf[256];
