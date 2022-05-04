@@ -9,6 +9,10 @@ parameters:
     label: Threshold
     dtype: int
     default: '10'
+-   id: jrb_sequence
+    label: JRB Sequence
+    dtype: hex
+    default: '0x00'
 
 inputs:
 -   domain: stream
@@ -21,6 +25,6 @@ outputs:
 
 templates:
     imports: import ieee802_15_4
-    make: ieee802_15_4.packet_sink(${th})
+    make: ieee802_15_4.packet_sink(${th}, ${jrb_sequence})
 
 file_format: 1

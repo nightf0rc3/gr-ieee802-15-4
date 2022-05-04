@@ -48,6 +48,7 @@ namespace gr {
        static sptr make(bool debug = false,
                      int target = 0xffff,
                      int threshold = 10,
+                     unsigned int jrb_sequence = 0x00,
                      int jam_duration = 200);
     };
 

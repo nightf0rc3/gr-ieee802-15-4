@@ -4,7 +4,7 @@ category: '[IEEE802.15.4]'
 
 templates:
     imports: import ieee802_15_4
-    make: ieee802_15_4.selective_jammer(${debug},${target},${th},${jam_dur})
+    make: ieee802_15_4.selective_jammer(${debug},${target},${th},${jrb_sequence},${jam_dur})
 
 #  Make one 'parameters' list entry for every parameter you want settable from the GUI.
 #     Keys include:
@@ -26,6 +26,10 @@ parameters:
     label: Threshold
     dtype: int
     default: '10'
+-   id: jrb_sequence
+    label: JRB Sequence
+    dtype: hex
+    default: '0x00'
 -   id: jam_dur
     label: Jamming Duration
     dtype: int

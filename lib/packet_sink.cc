@@ -54,6 +54,7 @@ static const int MAX_LQI_SAMPLES = 8;   // Number of chip correlation samples to
 class packet_sink_impl : public packet_sink
 {
 public:
+    // STATE init functions
     void enter_search()
     {
         if (VERBOSE)
@@ -64,6 +65,12 @@ public:
         d_preamble_cnt = 0;
         d_chip_cnt = 0;
         d_packet_byte = 0;
+        d_packet_complete[0] = 0;
+        d_packet_complete[1] = 0;
+        d_packet_complete[2] = 0;
+        d_packet_complete[3] = 0;
+        d_packet_complete[4] = 0;
+        d_packet_complete[5] = 0;
     }
 
     void enter_have_sync()
@@ -72,6 +79,21 @@ public:
             fprintf(stderr, "@ enter_have_sync\n");
 
         d_state = STATE_HAVE_SYNC;
+        d_packetlen_cnt = 0;
+        d_packet_byte = 0;
+        d_packet_byte_index = 0;
+
+        // Link Quality Information
+        d_lqi = 0;
+        d_lqi_sample_count = 0;
+    }
+
+    void enter_search_jrb()
+    {
+        if (VERBOSE)
+            fprintf(stderr, "@ enter_search_jrb\n");
+
+        d_state = STATE_SEARCH_JRB;
         d_packetlen_cnt = 0;
         d_packet_byte = 0;
         d_packet_byte_index = 0;
@@ -91,6 +113,7 @@ public:
         d_payload_cnt = 0;
         d_packet_byte = 0;
         d_packet_byte_index = 0;
+        d_bits_received_before_jam = 7 * 8;
     }
 
 
@@ -121,7 +144,6 @@ public:
                         (chips & 0x7FFFFFFE) ^ (CHIP_MAPPING[best_match] & 0x7FFFFFFE)),
                     fflush(stderr);
             // LQI: Average number of chips correct * MAX_LQI_SAMPLES
-            //
             if (d_lqi_sample_count < MAX_LQI_SAMPLES) {
                 d_lqi += 32 - min_threshold;
                 d_lqi_sample_count++;
@@ -129,23 +151,41 @@ public:
 
             return (char)best_match & 0xF;
         }
-        // if (VERBOSE_C)
-        //   fprintf(stderr,
-        //           "Found sequence with %d errors at 0x%x\n",
-        //           min_threshold,
-        //           (chips & 0x7FFFFFFE) ^ (CHIP_MAPPING[best_match] & 0x7FFFFFFE)),
-        //       fflush(stderr);
-
         return 0xFF;
+    }
+
+    void logPacketTransmissionStats() {
+        if (VERBOSE_C) {
+            fprintf(stderr,
+                "Bits before jam: %d, ReceivedBytes: %d/%d (%.1f%%), JammingRate: %.1f%%\n",
+                d_bits_received_before_jam,
+                d_payload_cnt+7,
+                d_packetlen+7,
+                ((float) (d_payload_cnt+7) / (d_packetlen+7)) * 100,
+                100 - (((float) (d_payload_cnt+7) / (d_packetlen+7)) * 100)),
+            fflush(stderr);
+            int i;
+            fprintf(stderr,
+                  "RX "),
+                  fflush(stderr);
+            for (i=0; i < d_packetlen_cnt + 7; i++) {
+                fprintf(stderr,
+                  "0x%x ",
+                  d_packet_complete[i] & 0xFF),
+                  fflush(stderr);
+            }
+            fprintf(stderr, "\n\n"), fflush(stderr);
+        }
     }
 
     int slice(float x) { return x > 0 ? 1 : 0; }
 
-    packet_sink_impl(int threshold)
+    packet_sink_impl(int threshold, unsigned int jrb_sequence)
         : block("packet_sink",
                 gr::io_signature::make(1, 1, sizeof(float)),
                 gr::io_signature::make(0, 0, 0)),
-          d_threshold(threshold)
+          d_threshold(threshold),
+          d_jrb_sequence(jrb_sequence)
     {
         d_sync_vector = 0xA7;
 
@@ -213,6 +253,7 @@ public:
                                     fflush(stderr);
                             // we found a 0 in the chip sequence
                             d_preamble_cnt += 1;
+                            d_packet_complete[0] = 0;
                             // fprintf(stderr, "Threshold %d d_preamble_cnt: %d\n",
                             // threshold, d_preamble_cnt);
                         }
@@ -233,15 +274,18 @@ public:
                                             fflush(stderr);
                                     // we found an other 0 in the chip sequence
                                     d_packet_byte = 0;
+                                    d_packet_complete[(d_preamble_cnt / 2)] = 0;
                                     d_preamble_cnt++;
                                 } else if (gr::blocks::count_bits32(
                                                (d_shift_reg & 0x7FFFFFFE) ^
                                                (CHIP_MAPPING[7] & 0xFFFFFFFE)) <=
                                            d_threshold) {
+                                    // is this really SDF??
+                                    // Looks like first significant byte of preamble 00(7)a
                                     if (VERBOSE2)
                                         fprintf(stderr, "Found first SFD\n"),
                                             fflush(stderr);
-                                    d_packet_byte = 7 << 4;
+                                    d_packet_byte = 7;
                                 } else {
                                     // we are not in the synchronization header
                                     if (VERBOSE2)
@@ -257,14 +301,16 @@ public:
                                 if (gr::blocks::count_bits32(
                                         (d_shift_reg & 0x7FFFFFFE) ^
                                         (CHIP_MAPPING[10] & 0xFFFFFFFE)) <= d_threshold) {
-                                    d_packet_byte |= 0xA;
+                                    d_packet_byte |= 0xA << 4;
+                                    d_packet_complete[4] = d_packet_byte;
                                     if (VERBOSE2)
                                         fprintf(
                                             stderr, "Found sync, 0x%x\n", d_packet_byte),
                                             fflush(stderr);
                                     // found SDF
                                     // setup for header decode
-                                    enter_have_sync();
+                                    // enter_have_sync();
+                                    enter_search_jrb();
                                     break;
                                 } else {
                                     if (VERBOSE)
@@ -276,6 +322,53 @@ public:
                                     break;
                                 }
                             }
+                        }
+                    }
+                }
+                break;
+
+            case STATE_SEARCH_JRB:
+                while (count < ninput) { // Decode the bytes one after another.
+                    if (slice(inbuf[count++]))
+                        d_shift_reg = (d_shift_reg << 1) | 1;
+                    else
+                        d_shift_reg = d_shift_reg << 1;
+
+                    d_chip_cnt = d_chip_cnt + 1;
+
+                    if (d_chip_cnt == 32) {
+                        d_chip_cnt = 0;
+                        unsigned char c = decode_chips(d_shift_reg);
+                        if (d_packet_byte_index == 0) {
+                            d_packet_byte = c;
+                            d_packet_complete[5] = c;
+                        } else {
+                            // c is always < 15
+                            d_packet_byte |= c << 4;
+                            d_packet_complete[5] |= c << 4;
+                        }
+                        d_packet_byte_index = d_packet_byte_index + 1;
+                        if (d_packet_byte_index % 2 == 0) {
+                            // we have a complete byte which represents the JRBs
+                            int jrb = d_packet_byte;
+                            
+                            if ((jrb & 0xFF) == (d_jrb_sequence & 0xFF)) {
+                              if (VERBOSE_C)
+                                fprintf(stderr,
+                                    "JRB untouched! 0x%x\n",
+                                    jrb),
+                                fflush(stderr);
+                                // enter_have_sync();
+                            } else {
+                               if (VERBOSE_C)
+                                fprintf(stderr,
+                                    "JRB modified! 0x%x\n",
+                                    jrb),
+                                fflush(stderr);
+                                enter_search();
+                            }
+                            enter_have_sync();
+                            break;
                         }
                     }
                 }
@@ -314,9 +407,11 @@ public:
 
                         if (d_packet_byte_index == 0) {
                             d_packet_byte = c;
+                            d_packet_complete[6] = d_packet_byte;
                         } else {
                             // c is always < 15
                             d_packet_byte |= c << 4;
+                            d_packet_complete[6] |= c << 4;
                         }
                         d_packet_byte_index = d_packet_byte_index + 1;
                         if (d_packet_byte_index % 2 == 0) {
@@ -358,22 +453,15 @@ public:
                     if (d_chip_cnt == 0) {
                         unsigned char c = decode_chips(d_shift_reg);
                         if (c == 0xff) {
-                            std::string s = std::bitset<32>(d_shift_reg).to_string();
-                            if (VERBOSE_C) {
+                            std::string lastChips = std::bitset<32>(d_shift_reg).to_string();
+                            std::string lastValidChips = std::bitset<32>(d_packet_byte_index == 1 ? d_first_chip : d_second_chip).to_string();
+                            if (VERBOSE_C)
                                 fprintf(stderr,
-                                      "Bits before jam: %d, Last chip(b): %s\n",
-                                      d_bits_received_before_jam,
-                                      s.c_str()),
+                                      "Last chip(b): %s, Last valid chip(b): %s\n",
+                                      lastChips.c_str(),
+                                      lastValidChips.c_str()),
                                   fflush(stderr);
-                                int i;
-                                for (i=0; i < d_packetlen_cnt; i++) {
-                                    fprintf(stderr,
-                                      "0x%x ",
-                                      d_packet[i]),
-                                      fflush(stderr);
-                                }
-                                fprintf(stderr, "\n"), fflush(stderr);
-                            }
+                            logPacketTransmissionStats();
                             d_bits_received_before_jam = 0;
                             // something is wrong. restart the search for a sync
                             if (VERBOSE2)
@@ -385,15 +473,19 @@ public:
                             enter_search();
                             break;
                         }
-                        d_bits_received_before_jam = d_bits_received_before_jam + 16;
+                        d_last_shift_reg = d_shift_reg;
+                        d_bits_received_before_jam = d_bits_received_before_jam + 4;
                         // the first symbol represents the first part of the byte.
                         if (d_packet_byte_index == 0) {
                             d_first_chip = d_shift_reg;
                             d_packet_byte = c;
+                            // 6 already set by frame length
+                            d_packet_complete[7 + d_packetlen_cnt] = c;
                         } else {
                             d_second_chip = d_shift_reg;
                             // c is always < 15
                             d_packet_byte |= c << 4;
+                            d_packet_complete[7 + d_packetlen_cnt] |= c << 4;
                         }
                         // fprintf(stderr, "%d: 0x%x\n", d_packet_byte_index, c);
                         d_packet_byte_index = d_packet_byte_index + 1;
@@ -429,6 +521,7 @@ public:
                                         "Complete Packet Received, length: %d \n",
                                         d_payload_cnt),
                                     fflush(stderr);
+                                logPacketTransmissionStats();
                                 unsigned int scaled_lqi = (d_lqi / MAX_LQI_SAMPLES) << 3;
                                 unsigned char lqi =
                                     (scaled_lqi >= 256 ? 255 : scaled_lqi);
@@ -470,7 +563,7 @@ public:
     }
 
 private:
-    enum { STATE_SYNC_SEARCH, STATE_HAVE_SYNC, STATE_HAVE_HEADER } d_state;
+    enum { STATE_SYNC_SEARCH, STATE_HAVE_SYNC, STATE_HAVE_HEADER, STATE_SEARCH_JRB } d_state;
 
     unsigned int d_sync_vector; // 802.15.4 standard is 4x 0 bytes and 1x0xA7
     unsigned int d_threshold;   // how many bits may be wrong in sync vector
@@ -496,12 +589,18 @@ private:
     unsigned int d_bits_received_before_jam = 0;
     unsigned int d_first_chip;
     unsigned int d_second_chip;
+    unsigned int d_jrb_sequence;
+
+    unsigned int d_last_shift_reg; // used to look for sync_vector
+
+    // complete packet
+    unsigned char d_packet_complete[MAX_PKT_LEN]; // assembled payload
 
     // FIXME:
     char buf[256];
 };
 
-packet_sink::sptr packet_sink::make(unsigned int threshold)
+packet_sink::sptr packet_sink::make(unsigned int threshold, unsigned int jrb_sequence)
 {
-    return gnuradio::get_initial_sptr(new packet_sink_impl(threshold));
+    return gnuradio::get_initial_sptr(new packet_sink_impl(threshold, jrb_sequence));
 }

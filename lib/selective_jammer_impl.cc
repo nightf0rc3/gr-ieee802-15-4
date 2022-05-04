@@ -25,7 +25,6 @@
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
-#include <ctime>
 
 using namespace gr::ieee802_15_4;
 
@@ -43,24 +42,10 @@ using namespace gr::ieee802_15_4;
 // happening.
 // See "CMOS RFIC Architectures for IEEE 802.15.4 Networks",
 // John Notor, Anthony Caviglia, Gary Levy, for more details.
-// To Hex
 static const unsigned int CHIP_MAPPING[] = {
-    1618456172, // preamble, 0
-    1309113062, // 1
-    1826650030,
-    1724778362,
-    778887287, // 4
-    2061946375,
-    2007919840,
-    125494990, // SFD first byte, 7
-    529027475,
-    838370585,
-    320833617, // SFD second byte, 10
-    422705285,
-    1368596360,
-    85537272,
-    139563807,
-    2021988657
+    1618456172, 1309113062, 1826650030, 1724778362, 778887287, 2061946375,
+    2007919840, 125494990,  529027475,  838370585,  320833617, 422705285,
+    1368596360, 85537272,   139563807,  2021988657
 };
 
 static const int MAX_PKT_LEN = 128 - 1; // remove header and CRC
@@ -69,8 +54,7 @@ static const int MAX_LQI_SAMPLES = 8;   // Number of chip correlation samples to
 class selective_jammer_impl : public selective_jammer
 {
 public:
-    #define dout d_debug&& std::cout
-
+    // STATE init functions
     void enter_search()
     {
         if (VERBOSE)
@@ -98,6 +82,21 @@ public:
         d_lqi_sample_count = 0;
     }
 
+    void enter_search_jrb()
+    {
+        if (VERBOSE)
+            fprintf(stderr, "@ enter_search_jrb\n");
+
+        d_state = STATE_SEARCH_JRB;
+        d_packetlen_cnt = 0;
+        d_packet_byte = 0;
+        d_packet_byte_index = 0;
+
+        // Link Quality Information
+        d_lqi = 0;
+        d_lqi_sample_count = 0;
+    }
+
     void enter_have_header(int payload_len)
     {
         if (VERBOSE)
@@ -110,15 +109,6 @@ public:
         d_packet_byte_index = 0;
     }
 
-    void print_hex_addr()
-    {
-        dout << "selective_jammer: Dst Addr ";
-        for (int i = 0; i < 2; i++) {
-            dout << std::setfill('0') << std::setw(2) << std::hex
-                 << ((unsigned int)d_addr[i] & 0xFF) << std::dec << " ";
-        }
-        dout << std::endl;
-    }
 
     unsigned char decode_chips(unsigned int chips)
     {
@@ -147,7 +137,6 @@ public:
                         (chips & 0x7FFFFFFE) ^ (CHIP_MAPPING[best_match] & 0x7FFFFFFE)),
                     fflush(stderr);
             // LQI: Average number of chips correct * MAX_LQI_SAMPLES
-            //
             if (d_lqi_sample_count < MAX_LQI_SAMPLES) {
                 d_lqi += 32 - min_threshold;
                 d_lqi_sample_count++;
@@ -155,17 +144,17 @@ public:
 
             return (char)best_match & 0xF;
         }
-
         return 0xFF;
     }
 
     int slice(float x) { return x > 0 ? 1 : 0; }
 
-    selective_jammer_impl(bool debug, int target, int threshold, int jam_duration)
+    selective_jammer_impl(bool debug, int target, int threshold, unsigned int jrb_sequence, int jam_duration)
         : block("selective_jammer",
                 gr::io_signature::make(1, 1, sizeof(float)),
                 gr::io_signature::make(0, 0, 0)),
           d_threshold(threshold),
+          d_jrb_sequence(jrb_sequence),
           d_target(target),
           d_debug(debug),
           d_jam_duration(jam_duration)
@@ -177,7 +166,6 @@ public:
         d_lqi_sample_count = 0;
 
         d_finished = false;
-        // d_thread = gr::thread::thread([this] { run(); });
 
         if (VERBOSE)
             fprintf(stderr, "syncvec: %x, threshold: %d\n", d_sync_vector, d_threshold),
@@ -204,7 +192,6 @@ public:
         int count = 0;
         int i = 0;
 
-        // dout << "selective_jammer: Init state machine, STATE:" << d_state << " Input: "<< ninput << std::endl;
         if (VERBOSE)
             fprintf(stderr, ">>> Entering state machine\n"), fflush(stderr);
 
@@ -220,9 +207,7 @@ public:
                         fflush(stderr);
 
                 while (count < ninput) {
-                    // d_shift_reg wird mit bits aus input gefüllt
-                    // if input 1, shift left set last bit 1
-                    // if input 0, shift left
+
                     if (slice(inbuf[count++]))
                         d_shift_reg = (d_shift_reg << 1) | 1;
                     else
@@ -232,24 +217,9 @@ public:
                         d_chip_cnt = d_chip_cnt + 1;
                     }
 
-                    // The first if block syncronizes to chip sequences.
+                    // The first if block synchronizes to chip sequences.
                     if (d_preamble_cnt == 0) {
-                        // 0x7FFFFFFE == 2.147.483.646 -> INT_MAX
                         unsigned int threshold;
-                        // &
-                        //  0000 0000 0000 0000 0000 0000 0000 0001
-                        //  0111 1111 1111 1111 1111 1111 1111 1110
-                        // =0000 0000 0000 0000 0000 0000 0000 0000
-
-                        // &
-                        //  0110 0000 0111 0111 1010 1110 0110 1100
-                        //  0111 1111 1111 1111 1111 1111 1111 1110
-                        // =0110 0000 0111 0111 1010 1110 0110 1100
-
-                        // XOR
-                        //  0000 0000 0000 0000 0000 0000 0000 0000
-                        //  0110 0000 0111 0111 1010 1110 0110 1100
-                        // =0110 0000 0111 0111 1010 1110 0110 1100
                         threshold = gr::blocks::count_bits32(
                             (d_shift_reg & 0x7FFFFFFE) ^ (CHIP_MAPPING[0] & 0x7FFFFFFE));
                         if (threshold < d_threshold) {
@@ -286,10 +256,12 @@ public:
                                                (d_shift_reg & 0x7FFFFFFE) ^
                                                (CHIP_MAPPING[7] & 0xFFFFFFFE)) <=
                                            d_threshold) {
+                                    // is this really SDF??
+                                    // Looks like first significant byte of preamble 00(7)a
                                     if (VERBOSE2)
                                         fprintf(stderr, "Found first SFD\n"),
                                             fflush(stderr);
-                                    d_packet_byte = 7 << 4; // add bits of 7 and shift by 4
+                                    d_packet_byte = 7 << 4;
                                 } else {
                                     // we are not in the synchronization header
                                     if (VERBOSE2)
@@ -305,14 +277,15 @@ public:
                                 if (gr::blocks::count_bits32(
                                         (d_shift_reg & 0x7FFFFFFE) ^
                                         (CHIP_MAPPING[10] & 0xFFFFFFFE)) <= d_threshold) {
-                                    d_packet_byte |= 0xA; // set last 4 bits 1010 (10)
+                                    d_packet_byte |= 0xA;
                                     if (VERBOSE2)
                                         fprintf(
                                             stderr, "Found sync, 0x%x\n", d_packet_byte),
                                             fflush(stderr);
                                     // found SDF
                                     // setup for header decode
-                                    enter_have_sync();
+                                    // enter_have_sync();
+                                    enter_search_jrb();
                                     break;
                                 } else {
                                     if (VERBOSE)
@@ -329,9 +302,52 @@ public:
                 }
                 break;
 
+            case STATE_SEARCH_JRB:
+                while (count < ninput) { // Decode the bytes one after another.
+                    if (slice(inbuf[count++]))
+                        d_shift_reg = (d_shift_reg << 1) | 1;
+                    else
+                        d_shift_reg = d_shift_reg << 1;
+
+                    d_chip_cnt = d_chip_cnt + 1;
+
+                    if (d_chip_cnt == 32) {
+                        d_chip_cnt = 0;
+                        unsigned char c = decode_chips(d_shift_reg);
+                        if (d_packet_byte_index == 0) {
+                            d_packet_byte = c;
+                        } else {
+                            // c is always < 15
+                            d_packet_byte |= c << 4;
+                        }
+                        d_packet_byte_index = d_packet_byte_index + 1;
+                        if (d_packet_byte_index % 2 == 0) {
+                            // we have a complete byte which represents the JRBs
+                            int jrb = d_packet_byte;
+                            if ((jrb & 0xFF) == (d_jrb_sequence & 0xFF)) {
+                              if (VERBOSE_C)
+                                fprintf(stderr,
+                                    "JRB untouched! 0x%x\n",
+                                    jrb),
+                                fflush(stderr);
+                                // enter_have_sync();
+                            } else {
+                               if (VERBOSE_C)
+                                fprintf(stderr,
+                                    "JRB modified! 0x%x\n",
+                                    jrb),
+                                fflush(stderr);
+                                enter_search();
+                            }
+                            enter_have_sync();
+                            break;
+                        }
+                    }
+                }
+                break;
+
             case STATE_HAVE_SYNC:
                 if (VERBOSE2)
-                    // FIXME: this is never set...
                     fprintf(stderr,
                             "Header Search bitcnt=%d, header=0x%08x\n",
                             d_headerbitlen_cnt,
@@ -370,7 +386,6 @@ public:
                         d_packet_byte_index = d_packet_byte_index + 1;
                         if (d_packet_byte_index % 2 == 0) {
                             // we have a complete byte which represents the frame length.
-                            // TODO: FRAME LENGTH HERE
                             int frame_len = d_packet_byte;
                             if (VERBOSE_C)
                                 fprintf(stderr,
@@ -378,7 +393,6 @@ public:
                                         frame_len),
                                     fflush(stderr);
                             if (frame_len <= MAX_PKT_LEN) {
-                                // dout << "selective_jammer: got frame length" << std::endl;
                                 enter_have_header(frame_len);
                             } else {
                                 enter_search();
@@ -409,6 +423,27 @@ public:
                     if (d_chip_cnt == 0) {
                         unsigned char c = decode_chips(d_shift_reg);
                         if (c == 0xff) {
+                            std::string s = std::bitset<32>(d_shift_reg).to_string();
+                            if (VERBOSE_C) {
+                                fprintf(stderr,
+                                      "Bits before jam: %d, Last chip(b): %s\n",
+                                      d_bits_received_before_jam,
+                                      s.c_str()),
+                                  fflush(stderr);
+                                int i;
+                                // add preamble to log manually
+                                fprintf(stderr,
+                                      "RX 0x0 0x0 0x0 0x0 0xa7 0xee 0x3c "),
+                                      fflush(stderr);
+                                for (i=0; i < d_packetlen_cnt; i++) {
+                                    fprintf(stderr,
+                                      "0x%x ",
+                                      d_packet[i] & 0xFF),
+                                      fflush(stderr);
+                                }
+                                fprintf(stderr, "\n"), fflush(stderr);
+                            }
+                            d_bits_received_before_jam = 0;
                             // something is wrong. restart the search for a sync
                             if (VERBOSE2)
                                 fprintf(stderr,
@@ -419,12 +454,13 @@ public:
                             enter_search();
                             break;
                         }
+                        d_bits_received_before_jam = d_bits_received_before_jam + 4;
                         // the first symbol represents the first part of the byte.
-                        // 0000 (0000) <- This
                         if (d_packet_byte_index == 0) {
+                            d_first_chip = d_shift_reg;
                             d_packet_byte = c;
                         } else {
-                            // This -> (0000) 0000
+                            d_second_chip = d_shift_reg;
                             // c is always < 15
                             d_packet_byte |= c << 4;
                         }
@@ -432,23 +468,21 @@ public:
                         d_packet_byte_index = d_packet_byte_index + 1;
                         if (d_packet_byte_index % 2 == 0) {
                             // we have a complete byte
-                            if (VERBOSE2 || VERBOSE_C)
+                            if (VERBOSE2)
                                 fprintf(stderr,
-                                        "packetcnt: %d, payloadcnt: %d, payload 0x%x \n",
+                                        "packetcnt: %d, payloadcnt: %d, payload: 0x%x, chips: [%u,%u] \n",
                                         d_packetlen_cnt,
                                         d_payload_cnt,
-                                        d_packet_byte),
+                                        d_packet_byte,
+                                        d_first_chip,
+                                        d_second_chip),
                                     fflush(stderr);
 
                             d_packet[d_packetlen_cnt++] = d_packet_byte;
                             d_payload_cnt++;
                             d_packet_byte_index = 0;
-                            // ---------------- JAMMER TARGET DETECTION ----------------
-                            // SYNC: 4 Byte preamble, 1 Byte SoF, 
-                            // PHY: 1 Byte FrameLength
-                            // MAC: 2 Byte Frame Control, 1 Byte Sequence Number, 0-20 Byte Addr
+
                             if (d_payload_cnt == 3) {
-                              d_target_frame_num = d_packet_byte;
                               if (VERBOSE_C)
                                 fprintf(stderr,
                                         "Got FrameNo: %d \n",
@@ -456,28 +490,41 @@ public:
                                     fflush(stderr);
                             }
                             // Build Dst Addr
-                            if (d_payload_cnt == 6) {
-                              d_addr[0] = d_packet_byte;
-                            }
                             if (d_payload_cnt == 7) {
-                              d_addr[1] = d_packet_byte;
-                              print_hex_addr();
+                              // d_packet[d_packetlen_cnt -2] // 6
+                              // d_packet[d_packetlen_cnt -1] // 7
+
+                              if (VERBOSE_C)
+                                fprintf(stderr,
+                                        "Got Packet Target Address: 0x%x 0x%x\n",
+                                        d_packet[d_packetlen_cnt -1],
+                                        d_packet[d_packetlen_cnt -2]),
+                                    fflush(stderr);
 
                               // check if target
-                              if ((d_target & 0xFF) == (d_addr[0] & 0xFF) && ((d_target >> 8) & 0xFF) == (d_addr[1] & 0xFF)) {
-                                dout << "selective_jammer: Target addr FOUND in Frame " << d_target_frame_num << std::endl;
+                              if ((d_target & 0xFF) == (d_packet[d_packetlen_cnt -2] & 0xFF) && ((d_target >> 8) & 0xFF) == (d_packet[d_packetlen_cnt -1] & 0xFF)) {
+                                if (VERBOSE_C)
+                                  fprintf(stderr,
+                                          "Packet Target Address match: 0x%x 0x%x, start jamming [duration=%dms]\n",
+                                          d_packet[d_packetlen_cnt -1],
+                                          d_packet[d_packetlen_cnt -2],
+                                          d_jam_duration),
+                                      fflush(stderr);
                                 // notify sdr sink
-                                dout << "selective_jammer: gain=on, duration=" << d_jam_duration << std::endl;
                                 pmt::pmt_t msg = pmt::make_dict();
                                 msg = pmt::dict_add(msg, pmt::mp("gain"), pmt::mp(40.0));
                                 message_port_pub(pmt::mp("out"), msg);
                                 // delay gain=off message
+                                // TODO: check threadsafe
                                 d_thread = gr::thread::thread([this] {
                                   if (d_finished) {
                                       return;
                                   }
                                   boost::this_thread::sleep(boost::posix_time::milliseconds(d_jam_duration));
-                                  dout << "selective_jammer: gain=off" << std::endl;
+                                  if (VERBOSE_C)
+                                    fprintf(stderr,
+                                            "Stop jamming\n"),
+                                        fflush(stderr);
                                   pmt::pmt_t msg2 = pmt::make_dict();
                                   msg2 = pmt::dict_add(msg2, pmt::mp("gain"), pmt::mp(0.0));
                                   message_port_pub(pmt::mp("out"), msg2);
@@ -485,19 +532,36 @@ public:
                               }
                             }
                             // ---------------- JAMMER TARGET DETECTION ----------------
+
                             if (d_payload_cnt >=
                                 d_packetlen) { // packet is filled, including CRC. might
                                                // do check later in here
-                                unsigned int scaled_lqi = (d_lqi / MAX_LQI_SAMPLES) << 3;
-                                unsigned char lqi =
-                                    (scaled_lqi >= 256 ? 255 : scaled_lqi);
+                                if (VERBOSE_C) {
+                                  fprintf(stderr,
+                                        "Complete Packet Received, length: %d \n",
+                                        d_payload_cnt),
+                                    fflush(stderr);
+                                  fprintf(stderr,
+                                        "RX 0x0 0x0 0x0 0x0 0xa7 0xee 0x3c "),
+                                        fflush(stderr);
+                                  for (i=0; i < d_packetlen_cnt; i++) {
+                                      fprintf(stderr,
+                                        "0x%x ",
+                                        d_packet[i] & 0xFF),
+                                        fflush(stderr);
+                                  }
+                                  fprintf(stderr, "\n"), fflush(stderr);
+                                }
+                                // unsigned int scaled_lqi = (d_lqi / MAX_LQI_SAMPLES) << 3;
+                                // unsigned char lqi =
+                                //     (scaled_lqi >= 256 ? 255 : scaled_lqi);
 
-                                pmt::pmt_t meta = pmt::make_dict();
-                                meta = pmt::dict_add(
-                                    meta, pmt::mp("lqi"), pmt::from_long(lqi));
+                                // pmt::pmt_t meta = pmt::make_dict();
+                                // meta = pmt::dict_add(
+                                //     meta, pmt::mp("lqi"), pmt::from_long(lqi));
 
-                                std::memcpy(buf, d_packet, d_packetlen_cnt);
-                                pmt::pmt_t payload = pmt::make_blob(buf, d_packetlen_cnt);
+                                // std::memcpy(buf, d_packet, d_packetlen_cnt);
+                                // pmt::pmt_t payload = pmt::make_blob(buf, d_packetlen_cnt);
 
                                 if (VERBOSE2)
                                     fprintf(stderr,
@@ -517,7 +581,7 @@ public:
             }
         }
 
-        if (VERBOSE2 || VERBOSE_C)
+        if (VERBOSE2)
             fprintf(stderr, "Samples Processed: %d\n", ninput_items[0]), fflush(stderr);
 
         consume(0, ninput_items[0]);
@@ -526,7 +590,7 @@ public:
     }
 
 private:
-    enum { STATE_SYNC_SEARCH, STATE_HAVE_SYNC, STATE_HAVE_HEADER } d_state;
+    enum { STATE_SYNC_SEARCH, STATE_HAVE_SYNC, STATE_HAVE_HEADER, STATE_SEARCH_JRB } d_state;
 
     unsigned int d_sync_vector; // 802.15.4 standard is 4x 0 bytes and 1x0xA7
     unsigned int d_threshold;   // how many bits may be wrong in sync vector
@@ -548,22 +612,24 @@ private:
     unsigned int d_lqi; // Link Quality Information
     unsigned int d_lqi_sample_count;
 
-    // ---------- NEW ----------
-    bool d_debug;
-    int d_jam_duration;
-    uint16_t d_target;
-
-    unsigned char d_addr[2];
-    int d_target_frame_num;
-    
-    std::atomic<bool> d_finished;
-    gr::thread::thread d_thread;
+    // NEW
+    unsigned int d_bits_received_before_jam = 0;
+    unsigned int d_first_chip;
+    unsigned int d_second_chip;
+    unsigned int d_jrb_sequence;
 
     // FIXME:
     char buf[256];
+
+    bool d_debug;
+    int d_jam_duration;
+    uint16_t d_target;
+    
+    std::atomic<bool> d_finished;
+    gr::thread::thread d_thread;
 };
 
-selective_jammer::sptr selective_jammer::make(bool debug, int target, int threshold, int jam_duration)
+selective_jammer::sptr selective_jammer::make(bool debug, int target, int threshold, unsigned int jrb_sequence, int jam_duration)
 {
-    return gnuradio::get_initial_sptr(new selective_jammer_impl(debug, target, threshold, jam_duration));
+    return gnuradio::get_initial_sptr(new selective_jammer_impl(debug, target, threshold, jrb_sequence, jam_duration));
 }
